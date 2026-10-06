@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Excel to ILIAS Pool Converter</title>
+    <!-- Tailwind CSS for clean styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- SheetJS for parsing Excel files -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <!-- JSZip for creating the zip archive -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans min-h-screen flex items-center justify-center p-6">
+
+    <div class="max-w-xl w-full bg-white rounded-lg shadow-md p-8">
+        <h1 class="text-2xl font-bold text-gray-900 mb-2">Excel to ILIAS Converter</h1>
+        <p class="text-sm text-gray-600 mb-6">Upload your Excel file to generate the exact same ILIAS ZIP archive as the Python script.</p>
+        
+        <div class="mb-4">
+            <label class="block text-sm font-medium text-gray-700 mb-2">Select Excel File (.xlsx)</label>
+            <input type="file" id="upload" accept=".xlsx, .xls" class="block w-full text-sm text-gray-500
+                file:mr-4 file:py-2 file:px-4
+                file:rounded-md file:border-0
+                file:text-sm file:font-semibold
+                file:bg-blue-50 file:text-blue-700
+                hover:file:bg-blue-100
+                border border-gray-300 rounded-md cursor-pointer
+            "/>
+        </div>
+
+        <div class="mb-6 flex items-center">
+            <input type="checkbox" id="skipHeader" checked class="h-4 w-4 text-blue-600 border-gray-300 rounded">
+            <label for="skipHeader" class="ml-2 block text-sm text-gray-700">
+                Skip first row (Headers) - <em>Matches Python Pandas default</em>
+            </label>
+        </div>
+
+        <button id="convertBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded transition duration-200">
+            Convert & Download ZIP
+        </button>
+
+        <div id="status" class="mt-4 text-sm font-medium text-center hidden"></div>
+    </div>
+
+    <script>
+        // HTML Escaping function matching Python's html.escape()
+        function escapeHTML(str) {
+            if (str === null || str === undefined) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#x27;');
+        }
+
+        document.getElementById('convertBtn').addEventListener('click', () => {
+            const fileInput = document.getElementById('upload');
+            const statusDiv = document.getElementById('status');
+            
+            if (!fileInput.files.length) {
+                alert("Please select an Excel file first.");
+                return;
+            }
+
+            statusDiv.classList.remove('hidden', 'text-green-600', 'text-red-600');
+            statusDiv.classList.add('text-blue-600');
+            statusDiv.innerText = "Processing...";
+
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+
+            reader.onload = (e) => {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, {type: 'array'});
+                    const firstSheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[firstSheetName];
+                    
+                    // Convert sheet to array of arrays
+                    const rows = XLSX.utils.sheet_to_json(worksheet, {header: 1});
+                    processData(rows);
+                } catch (error) {
+                    statusDiv.classList.remove('text-blue-600');
+                    statusDiv.classList.add('text-red-600');
+                    statusDiv.innerText = "Error processing file: " + error.message;
+                }
+            };
+            
+            reader.readAsArrayBuffer(file);
+        });
+
+        function processData(rows) {
+            const skipHeader = document.getElementById('skipHeader').checked;
+            let dataRows = skipHeader ? rows.slice(1) : rows; // pandas.read_excel defaults to skipping row 1
+            
+            const start_id = 263725;
+            let questions = [];
+
+            dataRows.forEach((row, index) => {
+                if (!row || row.length === 0) return; // Skip completely empty rows
+                
+                let question_text = String(row[0] !== undefined ? row[0] : '');
+                let correct_answer = String(row[1] !== undefined ? row[1] : '');
+                
+                // Collect answers (Correct is index 0, wrong answers follow indices 2 to 4)
+                let answers = [correct_answer];
+                for (let i = 2; i <= 4; i++) {
+                    if (row[i] !== undefined && row[i] !== null && String(row[i]).trim() !== '') {
+                        answers.push(String(row[i]));
+                    }
+                }
+
+                questions.push({
+                    id: start_id + index,
+                    text: question_text,
+                    answers: answers
+                });
+            });
+
+            generateZip(questions);
+        }
+
+        function generateZip(questions) {
+            const folder_name = "1787996706__2748__qpl_4659960";
+
+            // 1. Generate Content Object XML
+            let co_xml_content = `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE Test SYSTEM "http://www.ilias.uni-koeln.de/download/dtd/ilias_co.dtd"><!--Export
+of ILIAS Test Questionpool 4659960 of installation 2748-->
+<ContentObject Type="Questionpool_Test">
+    <Title>Test Fragenpool</Title>
+    <Description></Description>
+    <Settings>
+        <SkillService>0</SkillService>
+    </Settings>`;
+
+            questions.forEach(q => {
+                co_xml_content += `
+    <PageObject>
+        <PageContent>
+            <Question QRef="il_2748_qst_${q.id}" />
+        </PageContent>
+    </PageObject>`;
+            });
+
+            co_xml_content += "\n    <QuestionSkillAssignments>";
+            questions.forEach(q => {
+                co_xml_content += `
+        <TriggerQuestion Id="${q.id}"></TriggerQuestion>`;
+            });
+            co_xml_content += `
+    </QuestionSkillAssignments>
+</ContentObject>`;
+
+            // 2. Generate QTI XML
+            let qti_xml_content = `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE questestinterop SYSTEM "ims_qtiasiv1p2p1.dtd"><!--Generated
+by ILIAS XmlWriter-->
+<questestinterop>`;
+
+            questions.forEach((q, i) => {
+                let q_id = q.id;
+                let ident = `il_2748_qst_${q_id}`;
+                let title = q.text; // Exact script behavior: raw string for attribute
+                let escaped_q_text = escapeHTML(`<p>${q.text}</p>`); // Escaping HTML structure
+                
+                qti_xml_content += `
+    <item ident="${ident}" title="${title}" maxattempts="0">
+        <qticomment></qticomment>
+        <itemmetadata>
+            <qtimetadata>
+                <qtimetadatafield>
+                    <fieldlabel>ILIAS_VERSION</fieldlabel>
+                    <fieldentry>10.10.0</fieldentry>
+                </qtimetadatafield>
+                <qtimetadatafield>
+                    <fieldlabel>QUESTIONTYPE</fieldlabel>
+                    <fieldentry>assSingleChoice</fieldentry>
+                </qtimetadatafield>
+                <qtimetadatafield>
+                    <fieldlabel>AUTHOR</fieldlabel>
+                    <fieldentry>Diana Kretschmer</fieldentry>
+                </qtimetadatafield>
+                <qtimetadatafield>
+                    <fieldlabel>additional_cont_edit_mode</fieldlabel>
+                    <fieldentry>default</fieldentry>
+                </qtimetadatafield>
+                <qtimetadatafield>
+                    <fieldlabel>externalId</fieldlabel>
+                    <fieldentry>${ident}</fieldentry>
+                </qtimetadatafield>
+                <qtimetadatafield>
+                    <fieldlabel>ilias_lifecycle</fieldlabel>
+                    <fieldentry>draft</fieldentry>
+                </qtimetadatafield>
+                <qtimetadatafield>
+                    <fieldlabel>lifecycle</fieldlabel>
+                    <fieldentry>draft</fieldentry>
+                </qtimetadatafield>
+                <qtimetadatafield>
+                    <fieldlabel>thumb_size</fieldlabel>
+                    <fieldentry>150</fieldentry>
+                </qtimetadatafield>
+                <qtimetadatafield>
+                    <fieldlabel>feedback_setting</fieldlabel>
+                    <fieldentry>2</fieldentry>
+                </qtimetadatafield>
+                <qtimetadatafield>
+                    <fieldlabel>singleline</fieldlabel>
+                    <fieldentry>1</fieldentry>
+                </qtimetadatafield>
+            </qtimetadata>
+        </itemmetadata>
+        <presentation label="${title}">
+            <flow>
+                <material>
+                    <mattext texttype="text/xhtml">${escaped_q_text}</mattext>
+                </material>
+                <response_lid ident="MCSR" rcardinality="Single">
+                    <render_choice shuffle="Yes">`;
+                
+                q.answers.forEach((ans_text, ans_idx) => {
+                    qti_xml_content += `
+                        <response_label ident="${ans_idx}">
+                            <material>
+                                <mattext texttype="text/plain">${escapeHTML(ans_text)}</mattext>
+                            </material>
+                        </response_label>`;
+                });
+                
+                qti_xml_content += `
+                    </render_choice>
+                </response_lid>
+            </flow>
+        </presentation>
+        <resprocessing>
+            <outcomes>
+                <decvar></decvar>
+            </outcomes>`;
+            
+                q.answers.forEach((ans_text, ans_idx) => {
+                    let points = ans_idx === 0 ? "1" : "0";
+                    qti_xml_content += `
+            <respcondition continue="Yes">
+                <conditionvar>
+                    <varequal respident="MCSR">${ans_idx}</varequal>
+                </conditionvar>
+                <setvar action="Add">${points}</setvar>
+                <displayfeedback feedbacktype="Response" linkrefid="response_${ans_idx}" />
+            </respcondition>`;
+                });
+                
+                qti_xml_content += `
+        </resprocessing>`;
+                
+                q.answers.forEach((ans_text, ans_idx) => {
+                    qti_xml_content += `
+        <itemfeedback ident="response_${ans_idx}" view="All">
+            <flow_mat>
+                <material>
+                    <mattext texttype="text/plain"></mattext>
+                </material>
+            </flow_mat>
+        </itemfeedback>`;
+                });
+                
+                qti_xml_content += `
+    </item>`;
+            });
+
+            qti_xml_content += "\n</questestinterop>";
+
+            // 3. Build the ZIP File matching shutil.make_archive structure
+            const zip = new JSZip();
+            const rootFolder = zip.folder(folder_name); // Creates root folder inside zip
+            
+            rootFolder.file("1787996706__2748__qpl_4659960.xml", co_xml_content);
+            rootFolder.file("1787996706__2748__qti_4659960.xml", qti_xml_content);
+            rootFolder.folder("objects"); // Empty objects directory
+
+            // 4. Generate and download ZIP
+            zip.generateAsync({type:"blob"}).then(function(content) {
+                const url = URL.createObjectURL(content);
+                const a = document.createElement("a");
+                a.style.display = "none";
+                a.href = url;
+                a.download = folder_name + ".zip";
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                
+                const statusDiv = document.getElementById('status');
+                statusDiv.classList.remove('text-blue-600', 'hidden');
+                statusDiv.classList.add('text-green-600');
+                statusDiv.innerText = `Successfully processed ${questions.length} questions. Download started!`;
+            });
+        }
+    </script>
+</body>
+</html>
